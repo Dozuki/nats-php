@@ -25,9 +25,9 @@ class Client
 {
     public Connect $connect;
     public Info $info;
-    public readonly Api $api;
+    public Api $api;
 
-    private readonly ?Authenticator $authenticator;
+    private ?Authenticator $authenticator;
 
     private $socket;
     private $context;
@@ -40,7 +40,7 @@ class Client
     private bool $skipInvalidMessages = false;
 
     public function __construct(
-        public readonly Configuration $configuration = new Configuration(),
+        public Configuration $configuration = new Configuration(),
         public ?LoggerInterface $logger = null,
     ) {
         $this->api = new Api($this);

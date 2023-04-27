@@ -17,8 +17,8 @@ class Consumer
     private int $iterations = PHP_INT_MAX;
 
     public function __construct(
-        public readonly Client $client,
-        private readonly Configuration $configuration,
+        public Client $client,
+        private Configuration $configuration,
     ) {
     }
 

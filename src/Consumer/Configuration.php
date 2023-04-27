@@ -25,7 +25,7 @@ class Configuration
     private string $replayPolicy = ReplayPolicy::INSTANT;
 
     public function __construct(
-        private readonly string $stream,
+        private string $stream,
         private ?string $name = null
     ) {
     }
