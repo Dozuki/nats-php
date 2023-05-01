@@ -40,9 +40,13 @@ class Client
     private bool $skipInvalidMessages = false;
 
     public function __construct(
-        public Configuration $configuration = new Configuration(),
+        public Configuration $configuration = null,
         public ?LoggerInterface $logger = null,
     ) {
+        if ($configuration == null) {
+            $configuration = new Configuration();
+        }
+
         $this->api = new Api($this);
 
         $this->authenticator = Authenticator::create($this->configuration);
