@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Tests\Functional;
 
+use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\Configuration;
+use Basis\Nats\Consumer\Consumer;
+use Basis\Nats\Consumer\ReplayPolicy;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\RetentionPolicy;
 use Basis\Nats\Stream\StorageBackend;
@@ -13,6 +16,94 @@ use Tests\FunctionalTestCase;
 class StreamTest extends FunctionalTestCase
 {
     private mixed $called;
+
+    private bool $empty;
+
+    public function testNack()
+    {
+        $client = $this->createClient();
+        $stream = $client->getApi()->getStream('nacks');
+        $stream->getConfiguration()->setSubjects(['nacks'])->setRetentionPolicy(RetentionPolicy::INTEREST);
+        $stream->create();
+
+        $consumer = $stream->getConsumer('nacks');
+        $consumer->setExpires(5);
+        $consumer->getConfiguration()
+            ->setSubjectFilter('nacks')
+            ->setReplayPolicy(ReplayPolicy::INSTANT)
+            ->setAckPolicy(AckPolicy::EXPLICIT);
+
+        $consumer->create();
+
+        $stream->publish('nacks', 'first');
+        $stream->publish('nacks', 'second');
+
+        $this->assertSame(2, $consumer->info()->num_pending);
+
+        $queue = $consumer->getQueue();
+        $message = $queue->fetch();
+        $this->assertNotNull($message);
+        $this->assertSame((string) $message->payload, 'first');
+        $message->nack(1);
+
+        $this->assertSame(1, $consumer->info()->num_ack_pending);
+        $this->assertSame(1, $consumer->info()->num_pending);
+
+        $queue->setTimeout(1);
+        $messages = $queue->fetchAll();
+        $this->assertCount(1, $messages);
+        [$message] = $messages;
+        $this->assertSame((string) $message->payload, 'second');
+        $message->progress();
+        $message->ack();
+
+        $this->assertSame(1, $consumer->info()->num_ack_pending);
+        $this->assertSame(0, $consumer->info()->num_pending);
+    }
+
+    public function testPurge()
+    {
+        $client = $this->createClient();
+        $stream = $client->getApi()->getStream('purge');
+        $stream->getConfiguration()->setSubjects(['purge'])->setRetentionPolicy(RetentionPolicy::WORK_QUEUE);
+        $stream->create();
+
+        $consumer = $stream->getConsumer('purge');
+        $consumer->setExpires(5);
+        $consumer->getConfiguration()
+            ->setSubjectFilter('purge')
+            ->setReplayPolicy(ReplayPolicy::INSTANT)
+            ->setAckPolicy(AckPolicy::EXPLICIT);
+
+        $consumer->create();
+
+        $stream->publish('purge', 'first');
+        $stream->publish('purge', 'second');
+
+        $this->assertSame(2, $consumer->info()->num_pending);
+
+        $stream->purge();
+
+        $this->assertSame(0, $consumer->info()->num_pending);
+    }
+
+    public function testConsumerExpiration()
+    {
+        $client = $this->createClient(['timeout' => 0.2, 'delay' => 0.1]);
+        $stream = $client->getApi()->getStream('empty');
+        $stream->getConfiguration()
+            ->setSubjects(['empty']);
+
+        $stream->create();
+        $consumer = $stream->getConsumer('empty')->create();
+        $consumer->getConfiguration()->setSubjectFilter('empty');
+
+        $info = $client->connection->getInfoMessage();
+
+        $consumer->setIterations(1)->setExpires(3)->handle(function () {
+        });
+        $this->assertSame($info, $client->connection->getInfoMessage());
+    }
 
     public function testDeduplication()
     {
@@ -39,18 +130,18 @@ class StreamTest extends FunctionalTestCase
             ->create();
 
         $this->called = null;
-        $this->assertSame(1, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer, 1);
 
         $consumer->handle($this->persistMessage(...));
 
         $this->assertNotNull($this->called);
 
-        $this->assertSame(0, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer);
 
         $stream->put('tester', new Payload("hello", [
             'Nats-Msg-Id' => 'the-message'
         ]));
-        $this->assertSame(0, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer);
 
         // 500ms sleep
         usleep(500 * 1_000);
@@ -58,20 +149,20 @@ class StreamTest extends FunctionalTestCase
         $stream->put('tester', new Payload("hello", [
             'Nats-Msg-Id' => 'the-message'
         ]));
-        $this->assertSame(1, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer, 1);
 
         usleep(500 * 1_000);
 
         $stream->put('tester', new Payload("hello", [
             'Nats-Msg-Id' => 'the-message'
         ]));
-        $this->assertSame(2, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer, 2);
 
         $consumer->handle(function ($msg) {
             $this->assertSame($msg->getHeader('Nats-Msg-Id'), 'the-message');
         });
 
-        $this->assertSame(1, $consumer->info()->num_pending);
+        $this->assertWrongNumPending($consumer, 1);
     }
 
     public function testInterrupt()
@@ -84,27 +175,30 @@ class StreamTest extends FunctionalTestCase
         $consumer->getConfiguration()->setSubjectFilter('cucumber')->setMaxAckPending(2);
         $consumer->setDelay(0)->create();
 
+        $this->assertSame(2, $consumer->info()->getValue('config.max_ack_pending'));
+
         $this->getClient()->publish('cucumber', 'message1');
         $this->getClient()->publish('cucumber', 'message2');
         $this->getClient()->publish('cucumber', 'message3');
         $this->getClient()->publish('cucumber', 'message4');
 
-        $this->assertSame(4, $consumer->info()->getValue('num_pending'));
-        $this->assertSame(2, $consumer->info()->getValue('config.max_ack_pending'));
+        $this->assertWrongNumPending($consumer, 4);
 
         $consumer->setBatching(1)->setIterations(2)
             ->handle(function ($response) use ($consumer) {
                 $consumer->interrupt();
+                $this->logger?->info('interrupt!!');
             });
 
-        $this->assertSame(3, $consumer->info()->getValue('num_pending'));
+        $this->assertWrongNumPending($consumer, 3);
 
         $consumer->setBatching(2)->setIterations(1)
             ->handle(function ($response) use ($consumer) {
                 $consumer->interrupt();
+                $this->logger?->info('interrupt!!');
             });
 
-        $this->assertSame(1, $consumer->info()->getValue('num_pending'));
+        $this->assertWrongNumPending($consumer, 1);
     }
 
     public function testNoMessages()
@@ -112,7 +206,7 @@ class StreamTest extends FunctionalTestCase
         $this->called = false;
         $this->empty = false;
 
-        $stream = $this->getClient()->getApi()->getStream('no_messages');
+        $stream = $this->createClient(['reconnect' => false])->getApi()->getStream('no_messages');
         $stream->getConfiguration()->setSubjects(['cucumber']);
         $stream->create();
 
@@ -122,6 +216,7 @@ class StreamTest extends FunctionalTestCase
         $consumer->create()
             ->setDelay(0)
             ->setIterations(1)
+            ->setExpires(1)
             ->handle(function ($response) {
                 $this->called = $response;
             }, function () {
@@ -213,6 +308,7 @@ class StreamTest extends FunctionalTestCase
 
         $this->assertNotNull($this->called);
         $this->assertSame($this->called->name, 'nekufa');
+        $this->assertNotNull($this->called->timestampNanos);
 
         $this->called = null;
         $consumer = $stream->getConsumer('bye');
@@ -345,5 +441,20 @@ class StreamTest extends FunctionalTestCase
         // no more messages
         $consumer->setIterations(1);
         $this->assertSame(0, $consumer->handle($this->persistMessage(...)));
+    }
+
+    private function assertWrongNumPending(Consumer $consumer, ?int $expected = null, int $loops = 100): void
+    {
+        for ($i = 1; $i <= $loops; $i++) {
+            $actual = $consumer->info()->getValue('num_pending');
+
+            if ($actual === $expected) {
+                break;
+            }
+
+            if ($i == $loops) {
+                $this->assertSame($expected, $actual);
+            }
+        }
     }
 }

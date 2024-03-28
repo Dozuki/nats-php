@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Basis\Nats\KeyValue;
 
 use Basis\Nats\Client;
-use Basis\Nats\Stream\Stream;
+use Basis\Nats\Consumer\Configuration as ConsumerConfiguration;
 use Basis\Nats\Message\Payload;
+use Basis\Nats\Stream\Stream;
+use Exception;
 
 class Bucket
 {
@@ -23,8 +25,15 @@ class Bucket
 
     public function get(string $key)
     {
-        $entry = $this->getEntry($key);
-        return $entry ? $entry->value : null;
+        try {
+            $entry = $this->getEntry($key);
+            return $entry ? $entry->value : null;
+        } catch (Exception $e) {
+            if ($e->getMessage() == 'no message found') {
+                return null;
+            }
+            throw $e;
+        }
     }
 
     public function getConfiguration(): Configuration
@@ -45,6 +54,39 @@ class Bucket
         $value = base64_decode($response->message->data);
 
         return new Entry($this->name, $key, $value, $revision);
+    }
+
+    /**
+     * @return Entry[]
+     */
+    public function getAll(): array
+    {
+        $entries = [];
+
+        $stream = $this->getStream();
+        if (!$stream->exists()) {
+            return $entries;
+        }
+
+        $stream_name = $stream->getName();
+        $configuration = new ConsumerConfiguration($stream_name);
+        $consumer = $stream->createEphemeralConsumer($configuration);
+        $subject_prefix_length = 1 + strlen(sprintf('$KV.%s', $this->name));
+
+        $consumer->handle(function (Payload $payload) use (&$entries, $subject_prefix_length) {
+            if ($payload->subject === null) {
+                return;
+            }
+
+            $key = substr($payload->subject, $subject_prefix_length);
+            $entries[] = new Entry('', $key, $payload->body, 0);
+        }, function () use ($consumer) {
+            $consumer->interrupt();
+        });
+
+        $consumer->delete();
+
+        return $entries;
     }
 
     public function getStatus(): Status

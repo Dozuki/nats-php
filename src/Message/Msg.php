@@ -4,16 +4,22 @@ declare(strict_types=1);
 
 namespace Basis\Nats\Message;
 
+use Basis\Nats\Client;
 use Exception;
+use LogicException;
 
 class Msg extends Prototype
 {
-    public ?int $hlength = null;
-    public ?string $replyTo = null;
     public int $length;
     public Payload $payload;
     public string $sid;
     public string $subject;
+
+    public ?int $hlength = null;
+    public ?int $timestampNanos = null;
+    public ?string $replyTo = null;
+
+    private ?Client $client = null;
 
     public static function create(string $data): self
     {
@@ -52,12 +58,32 @@ class Msg extends Prototype
             }
         }
 
+        $values = self::tryParseMessageTime($values);
+
         return new self($values);
     }
 
-    public function __toString(): string
+    public function ack(): void
     {
-        return $this->payload->body;
+        $this->reply(new Ack([
+            'subject' => $this->replyTo
+        ]));
+    }
+
+    public function getClient(): ?Client
+    {
+        return $this->client;
+    }
+
+    public function nack(float $delay = 0): void
+    {
+        $this->reply(new Ack([
+            'command' => '-NAK',
+            'subject' => $this->replyTo,
+            'payload' => Payload::parse([
+                'delay' => $delay,
+            ]),
+        ]));
     }
 
     public function parse($payload): self
@@ -87,12 +113,77 @@ class Msg extends Prototype
             }
             $payload = substr($payload, $this->hlength);
         }
-        $this->payload = new Payload($payload, $headers, $this->subject);
+        $this->payload = new Payload(
+            $payload,
+            $headers,
+            $this->subject,
+            $this->timestampNanos
+        );
+
         return $this;
+    }
+
+    public function progress(): void
+    {
+        $this->reply(new Ack([
+            'command' => '+WPI',
+            'subject' => $this->replyTo,
+        ]));
     }
 
     public function render(): string
     {
         return 'MSG ' . json_encode($this);
+    }
+
+    public function reply($data): void
+    {
+        if (!$this->replyTo) {
+            throw new LogicException("Invalid replyTo property");
+        }
+        if ($data instanceof Prototype) {
+            $this->client->connection->sendMessage($data);
+        } else {
+            $this->client->publish($this->replyTo, $data);
+        }
+    }
+
+    public function setClient($client): void
+    {
+        $this->client = $client;
+    }
+
+    public function __toString(): string
+    {
+        return $this->payload->body;
+    }
+
+    private static function tryParseMessageTime(array $values): array
+    {
+        if (
+            !array_key_exists('replyTo', $values) || !str_starts_with($values['replyTo'], '$JS.ACK')
+        ) {
+            # This is not a JetStream message
+            return $values;
+        }
+
+        # old format
+        # "$JS.ACK.<stream>.<consumer>.<redeliveryCount><streamSeq><deliverySequence>.<timestamp>.<pending>"
+        # new format
+        # $JS.ACK.<domain>.<accounthash>.<stream>.<consumer>.<redeliveryCount>.<streamSeq>.<deliverySequence>.<timestamp>.<pending>.<random>
+        $tokens = explode('.', $values['replyTo']);
+        if (count($tokens) === 9) {
+            # if it is an old format we will add two missing items to process tokens in the same way
+            array_splice($tokens, 2, 0, ['', '']);
+        }
+
+        if (count($tokens) < 11) {
+            # Looks like invalid format was given
+            return $values;
+        }
+
+        $values['timestampNanos'] = (int) $tokens[9];
+
+        return $values;
     }
 }

@@ -9,7 +9,7 @@ use InvalidArgumentException;
 /**
  * @see https://github.com/selective-php/base32
  */
-class Base32Decoder
+class Base32
 {
     /**
      * @var array<string>
@@ -89,6 +89,57 @@ class Base32Decoder
     ];
 
     /**
+     * Encodes data with base32.
+     *
+     * @param string $input The original data, as a string
+     * @param bool $padding Use padding false when encoding for urls
+     *
+     * @return string The Base32 encoded string
+     */
+    public function encode(string $input, bool $padding = true): string
+    {
+        if ($input === '') {
+            return '';
+        }
+
+        $input = str_split($input);
+        $binaryString = '';
+
+        $inputCount = count($input);
+        for ($i = 0; $i < $inputCount; $i++) {
+            $binaryString .= str_pad(base_convert((string) ord($input[$i]), 10, 2), 8, '0', STR_PAD_LEFT);
+        }
+
+        $fiveBitBinaryArray = str_split($binaryString, 5);
+        $base32 = '';
+        $i = 0;
+        $fiveCount = count($fiveBitBinaryArray);
+
+        while ($i < $fiveCount) {
+            $base32 .= self::MAP[base_convert(str_pad($fiveBitBinaryArray[$i], 5, '0'), 2, 10)];
+            $i++;
+        }
+
+        $x = strlen($binaryString) % 40;
+        if ($padding && $x !== 0) {
+            if ($x === 8) {
+                return $base32 . str_repeat(self::MAP[32], 6);
+            }
+            if ($x === 16) {
+                return $base32 . str_repeat(self::MAP[32], 4);
+            }
+            if ($x === 24) {
+                return $base32 . str_repeat(self::MAP[32], 3);
+            }
+            if ($x === 32) {
+                return $base32 . self::MAP[32];
+            }
+        }
+
+        return $base32;
+    }
+
+    /**
      * Decodes data encoded with base32.
      * @throws InvalidArgumentException
      */
@@ -107,8 +158,9 @@ class Base32Decoder
         }
 
         for ($i = 0; $i < 4; $i++) {
-            if ($paddingCharCount === $allowedValues[$i] &&
-                substr($input, -($allowedValues[$i])) !== str_repeat(self::MAP[32], $allowedValues[$i])
+            if (
+                $paddingCharCount === $allowedValues[$i]
+                && substr($input, -($allowedValues[$i])) !== str_repeat(self::MAP[32], $allowedValues[$i])
             ) {
                 throw new InvalidArgumentException('Invalid base32 data');
             }
@@ -176,7 +228,7 @@ class Base32Decoder
         $binaryString = '';
 
         for ($z = 0; $z < $bitCount; $z++) {
-            $binaryString .= (($y = chr((int)base_convert($eightBits[$z], 2, 10))) || ord($y) === 48) ? $y : '';
+            $binaryString .= (($y = chr((int) base_convert($eightBits[$z], 2, 10))) || ord($y) === 48) ? $y : '';
         }
 
         return $binaryString;
