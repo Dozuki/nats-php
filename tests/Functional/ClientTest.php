@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Functional;
 
-use Basis\Nats\Client;
+use Basis\Nats\Connection;
 use ReflectionProperty;
 use Tests\FunctionalTestCase;
 
@@ -15,15 +15,30 @@ class ClientTest extends FunctionalTestCase
         $this->assertTrue($this->createClient()->ping());
     }
 
+    public function testConnectionTimeout(): void
+    {
+        $client = $this->createClient([
+            'reconnect' => false,
+        ]);
+        $this->assertTrue($client->ping());
+
+        $property = new ReflectionProperty(Connection::class, 'socket');
+        $property->setAccessible(true);
+        fclose($property->getValue($client->connection));
+
+        $this->expectExceptionMessage('supplied resource is not a valid stream resource');
+        $client->process(1);
+    }
+
     public function testReconnect()
     {
         $client = $this->getClient();
         $this->assertTrue($client->ping());
 
-        $property = new ReflectionProperty(Client::class, 'socket');
+        $property = new ReflectionProperty(Connection::class, 'socket');
         $property->setAccessible(true);
 
-        fclose($property->getValue($client));
+        fclose($property->getValue($client->connection));
 
         $this->assertTrue($client->ping());
     }
@@ -38,8 +53,8 @@ class ClientTest extends FunctionalTestCase
     {
         $client = $this->createClient();
         $client->setName('name-test');
-        $client->connect();
-        $this->assertSame($client->connect->name, 'name-test');
+        $client->ping();
+        $this->assertSame($client->connection->getConnectMessage()->name, 'name-test');
     }
 
     public function testInvalidConnection()
@@ -59,8 +74,8 @@ class ClientTest extends FunctionalTestCase
 
         $this->assertTrue($client->ping());
 
-        $this->assertTrue($client->info->tls_required);
-        $this->assertTrue($client->info->tls_verify);
+        $this->assertTrue($client->connection->getInfoMessage()->tls_required);
+        $this->assertTrue($client->connection->getInfoMessage()->tls_verify);
     }
 
 

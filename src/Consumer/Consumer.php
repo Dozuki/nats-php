@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace Basis\Nats\Consumer;
 
-use Closure;
 use Basis\Nats\Client;
+use Basis\Nats\Queue;
+use Basis\Nats\Message\Payload;
+use Basis\Nats\Message\Publish;
+use Closure;
+use Throwable;
 
 class Consumer
 {
@@ -25,9 +29,11 @@ class Consumer
     public function create($ifNotExists = true): self
     {
         if ($this->shouldCreateConsumer($ifNotExists)) {
-            $command = $this->configuration->isEphemeral() ?
-                'CONSUMER.CREATE.' . $this->getStream() :
-                'CONSUMER.DURABLE.CREATE.' . $this->getStream() . '.' . $this->getName();
+            if ($this->configuration->isEphemeral()) {
+                $command = 'CONSUMER.CREATE.' . $this->getStream();
+            } else {
+                $command = 'CONSUMER.DURABLE.CREATE.' . $this->getStream() . '.' . $this->getName();
+            }
 
             $result = $this->client->api($command, $this->configuration->toArray());
 
@@ -93,9 +99,11 @@ class Consumer
         return $this->iterations;
     }
 
-    public function handle(Closure $handler, Closure $emptyHandler = null): int
+    public function getQueue(): Queue
     {
-        $requestSubject = '$JS.API.CONSUMER.MSG.NEXT.' . $this->getStream() . '.' . $this->getName();
+        $queueSubject = 'handler.' . bin2hex(random_bytes(4));
+        $queue = $this->client->subscribe($queueSubject);
+
         $args = [
             'batch' => $this->getBatching(),
         ];
@@ -108,50 +116,59 @@ class Consumer
             $args['no_wait'] = true;
         }
 
-        $handlerSubject = 'handler.' . bin2hex(random_bytes(4));
+        $launcher = new Publish([
+            'payload' => Payload::parse($args),
+            'replyTo' => $queue->subject,
+            'subject' => '$JS.API.CONSUMER.MSG.NEXT.' . $this->getStream() . '.' . $this->getName(),
+        ]);
 
-        $runtime = new Runtime();
+        $queue->setLauncher($launcher);
+        return $queue;
+    }
 
-        $this->create();
+    public function handle(Closure $messageHandler, Closure $emptyHandler = null, bool $ack = true): int
+    {
+        $queue = $this->create()->getQueue();
+        $iterations = $this->getIterations();
+        $processed = 0;
 
-        $this->client->subscribe($handlerSubject, function ($message) use ($handler, $runtime) {
-            if (!$message->isEmpty()) {
-                $runtime->empty = false;
-                $runtime->processed++;
-                $handler($message);
-            }
-        });
-
-        $iteration = $this->getIterations();
-        while ($iteration--) {
-            $this->client->publish($requestSubject, $args, $handlerSubject);
-
-            foreach (range(1, $this->batch) as $_) {
-                $runtime->empty = true;
-                // expires request means that we should receive answer from stream
-                $this->client->process($this->expires ? PHP_INT_MAX : null);
-
-                if ($runtime->empty) {
-                    if ($emptyHandler) {
-                        $emptyHandler();
+        while (!$this->interrupt && $iterations--) {
+            $messages = $queue->fetchAll($this->getBatching());
+            foreach ($messages as $message) {
+                $processed++;
+                $payload = $message->payload;
+                if ($payload->isEmpty()) {
+                    if ($emptyHandler && !in_array($payload->getHeader('KV-Operation'), ['DEL', 'PURGE'])) {
+                        $emptyHandler($payload, $message->replyTo);
                     }
-                    break;
+                    continue;
+                }
+                try {
+                    $messageHandler($payload, $message->replyTo);
+                    if ($ack) {
+                        $message->ack();
+                    }
+                } catch (Throwable $e) {
+                    if ($ack) {
+                        $message->nack();
+                    }
+                    throw $e;
+                }
+                if ($this->interrupt) {
+                    $this->interrupt = false;
+                    break 2;
                 }
             }
-
-            if ($this->interrupt) {
-                $this->interrupt = false;
-                break;
-            }
-
-            if ($iteration && $runtime->empty) {
-                usleep((int) floor($this->getDelay() * 1_000_000));
+            if (!count($messages) && $emptyHandler) {
+                $emptyHandler();
+                if ($iterations) {
+                    usleep((int) floor($this->getDelay() * 1_000_000));
+                }
             }
         }
 
-        $this->client->unsubscribe($handlerSubject);
-
-        return $runtime->processed;
+        $this->client->unsubscribe($queue);
+        return $processed;
     }
 
     public function info()
