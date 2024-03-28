@@ -15,8 +15,8 @@ class Queue
     private ?Publish $launcher = null;
 
     public function __construct(
-        public readonly Client $client,
-        public readonly string $subject,
+        public Client $client,
+        public string $subject,
     ) {
         $this->timeout = $client->configuration->timeout;
     }

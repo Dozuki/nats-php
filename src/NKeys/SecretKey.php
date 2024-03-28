@@ -19,9 +19,9 @@ class SecretKey
     private ?string $publicKey = null;
 
     public function __construct(
-        public readonly string $value,
-        private readonly string $verifyingKey,
-        private readonly int $prefix
+        public string $value,
+        private string $verifyingKey,
+        private int $prefix
     ) {
         if (strlen($this->value) !== SODIUM_CRYPTO_SIGN_SECRETKEYBYTES) {
             throw new InvalidArgumentException("Invalid secret key provided");
